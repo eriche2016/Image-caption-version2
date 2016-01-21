@@ -84,8 +84,6 @@ function Dataset:getVocabSize()
 end 
 
 -------------------dreprecated version---------------------------------------
-=======
->>>>>>> 48991135cbd3407c202bb4a60a647013678b8a31
 
 function Dataset:loadDataset(opt)
 	local image_feats = matio.load(opt.path_vgg_features)
