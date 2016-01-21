@@ -64,6 +64,7 @@ def __buildVocab(imgs_info, params):
 
     max_len = max(sent_lengths.keys())
     print 'max length in raw data: ', max_len
+
     # record the max (word) length of the captions
 
     # we can overide or specify max_len, now just overide
@@ -149,7 +150,6 @@ def main(params):
     imgs_info = imgs['images']
 
     # create the vocab
-
     vocab = __buildVocab(imgs_info, params)
     # if loaded from lua, the key will be string
     itow = {i+1:w for i, w in enumerate(vocab)}
@@ -200,6 +200,7 @@ def main(params):
     # dump dict out to file
     json.dump(out, open(params['output_json'], 'w'))
     print 'wrote ', params['output_json']
+    vocab = __buildVocab(imgs_info, params)
 
 
 if __name__ == '__main__':
@@ -213,6 +214,9 @@ if __name__ == '__main__':
    # summary stuff
     parser.add_argument('-word_count_threshold', default=5, type=int, help = 'only words occurs greater than a threshod can it be added to the vocabulary')
     parser.add_argument('-max_len', default = 20, type=int, help='the max length of the sentences apprears in the caption')
+
+    # summary stuff
+    parser.add_argument('-word_count_threshold', default=5, type=int, help = 'only words occurs greater than a threshod can it be added to the vocabulary')
 
     args = parser.parse_args()
     params = vars(args)

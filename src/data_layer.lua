@@ -22,6 +22,7 @@ function Dataset:__init(opt)
 	self.cycle = 0
     self.gpuid = opt.gpuid or -1 -- by default use cpu, ie load data to cpu 
 end
+
 -----------added on Jan 21, 2016--------------------------
 function Dataset:loadDataset(opt) 
     print('loading features files extracted using vgg')
@@ -83,6 +84,8 @@ function Dataset:getVocabSize()
 end 
 
 -------------------dreprecated version---------------------------------------
+=======
+>>>>>>> 48991135cbd3407c202bb4a60a647013678b8a31
 
 function Dataset:loadDataset(opt)
 	local image_feats = matio.load(opt.path_vgg_features)
