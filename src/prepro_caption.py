@@ -107,6 +107,7 @@ def encode_captions(imgs_info, params, wtoi):
     label_arrays = []
     label_start_idx = np.zeros(nimgs, dtype='uint32')
     label_end_idx = np.zeros(nimgs, dtype='uint32')
+
     label_length = np.zeros(ncaptions, dtype='uint32')
 
     caption_counter = 0
