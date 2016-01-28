@@ -1,6 +1,13 @@
 ------------2015/1/5-----------------------------------------------
 -- increasing the batch size can make the loss decrease more steady
 -- otherwise, too small batch size will make the model fluctuates very heavily  
+--  Jan 27, 2016
+--  if there is cuda 77 error named illegal memory access
+-- after some iterations(this may be caused by indices out of bound), 
+--  then you need to check module which take indices as input: 
+--  1. ClassNLLCriterion module
+--  2. LookupTable module 
+--  etc.
 -------------------------------------------------------------------
 
 require 'torch'
@@ -25,6 +32,8 @@ cmd:text('Options: ')
 cmd:option('-path_vgg_features', '../data/coco/vgg_feats.mat', 'path to vgg feature files')
 cmd:option('-coco_dict_split', '../data/coco/coco_dict_path_split.json', 'path to image info file')
 cmd:option('-h5_file', '../data/coco/coco_labels.h5', 'coco labels info')
+cmd:option('-seq_per_image', 5, 'sequence per image')
+
 cmd:option('split', 'train', 'train, or test, or val')
 
 -- model params
@@ -49,9 +58,9 @@ cmd:option('-print_every', 10, 'how often to print loss')
 -- gpu/cpu
 cmd:option('-gpuid', 0, '0-indexed of gpu to use. -1 = cpu')
 
-
 local opt = cmd:parse(arg)
 torch.manualSeed(opt.seed)
+
 -- currently no gpu
 torch.setdefaulttensortype('torch.FloatTensor')
 
@@ -95,7 +104,7 @@ else
 
     -- construct model from scratch 
 	-- word embedding 
-	protos.word_embedding_layer = nn.Sequential(): add(nn.LookupTable(vocab_size, opt.embedding_size))
+	protos.word_embedding_layer = nn.Sequential(): add(nn.LookupTable(vocab_size+1, opt.embedding_size))
 	--protos.word_embedding_layer:add.Dropout(opt.dropout) -- may add dropout
     
 	-- image embedding 
@@ -105,15 +114,15 @@ else
 	protos.image_embedding_layer:add(nn.ReLU()) -- can also use nn.Tanh() 
 	-- can also add dropout layer 
     --protos.image_embedding_layer:add(nn.Dropout(opt.dropout))
-
 	protos.lstm = LSTM.create(opt.embedding_size, opt.rnn_size)
-
 	-- decoder 
 	protos.decoder = nn.Sequential() 
-	protos.decoder:add(nn.Linear(opt.rnn_size, vocab_size))
+	protos.decoder:add(nn.Linear(opt.rnn_size, vocab_size+1))
 	protos.decoder:add(nn.LogSoftMax())
+   
     -- negative log-likelihood loss
-	protos.criterion = nn.ClassNLLCriterion()
+    -- turn off the size average 
+	protos.criterion = nn.ClassNLLCriterion(nil, false)
 
 	if opt.gpuid >= 0 then   -- shift model and criterion to gpu, currently not consider it 
 		protos.image_embedding_layer = protos.image_embedding_layer:cuda()
@@ -124,6 +133,8 @@ else
 		protos.criterion = protos.criterion:cuda()
 	end 
 end 
+
+print(vocab_size+1)
 
 -- put all the language part  things into one flattened parameters tensor
 params, grad_params = utils.combine_all_parameters(protos.word_embedding_layer,  protos.lstm, protos.decoder)
@@ -137,7 +148,8 @@ if do_random_init then
 end
 
 -- create a bunch of clones 
--- just clones the modules 
+-- just clones the modules
+
 clones = {} 
 -- should keep image embeding layer separate for training 
 
@@ -153,8 +165,9 @@ collectgarbage() -- good practice garbage once in a shile
 
 
 init_state = {} 
-local h_init = torch.zeros(opt.batch_size, opt.rnn_size)
+local h_init = torch.zeros(opt.batch_size * opt.seq_per_image, opt.rnn_size)
 if opt.gpuid >= 0 then h_init = h_init:cuda() end 
+
 table.insert(init_state, h_init:clone()) -- init_state[1] = prev_c
 table.insert(init_state, h_init:clone()) -- init_state[2] = prec_h
 
@@ -198,6 +211,7 @@ feval_val = function(max_batches)
 end 
 --]]
 
+
 -- used for training
 -- do backward and forward propagation and return loss and grad_params
 
@@ -210,65 +224,66 @@ feval = function(x)
      ----------------------------------------------------------------------------
      ----get minibatch
      ----------------------------------------------------------------------------
-	image_batch, word_batch = loader:getNextBatch()
-    local start_token_batch = torch.LongTensor(opt.batch_size):fill(vocab_size + 1)  -- START is the same as END token, indicates the end of a sentence 
-    
+	
+    image_batch, word_batch = loader:getNextBatch()
+    local start_token_batch = torch.LongTensor(opt.batch_size * opt.seq_per_image):fill(vocab_size + 1) -- START is the same as END token, indicates the end of a sentence 
     
     if opt.gpuid >= 0 then 
-        -- word_batch = word_batch:cuda()  -- no need to shift to gpu, because already there 
-	    -- image_batch = image_batch:cuda() -- no need to shift to gpu, because already there
         start_token_batch = start_token_batch:cuda()
     end 
 
-
     ----------------------------------------------------------------------------
     -- forward pass 
-    -----------------------------------------------------------------------------
+    ----------------------------------------------------------------------------
     loss = 0.0
-    rnn_state = {[0] = init_state_global}
-    embeddings = {} 
-    predictions = {} -- record the output at each time step 
-    loss = 0.0
+
+    local rnn_state = {[0] = init_state_global}
+   
+    local embeddings = {} 
+    local predictions = {} -- record the output at each time step 
+    local loss = 0.0
     number_predictions = 0 
     nforwards = 0 
 
-    for t = 1, loader.seq_len+2 do 
+    for t = 1, loader.seq_len+2 do
         if t ==1 then 
-        	-- t = 1, just forward  a batch of images 
-            image_embedding_batch = protos.image_embedding_layer:forward(image_batch) 
-            embeddings[t] = image_embedding_batch  -- record embeddings[t]
 
-	        lst = clones.lstm[1]:forward({embeddings[t], unpack(rnn_state[0])}) -- prev_c, prev_h 
+        	-- t = 1, just forward  a batch of images 
+            embeddings[t] = protos.image_embedding_layer:forward(image_batch)  
+
+	        local lst = clones.lstm[1]:forward({embeddings[t], unpack(rnn_state[0])}) -- prev_c, prev_h 
             rnn_state[1] = {}
             for i = 1, #init_state do table.insert(rnn_state[1], lst[i]) end 
             -- output of the decoder, actually no need to record it, hereby just record it 
             predictions[1] = clones.decoder[1]:forward(lst[#lst]) -- actually no need to output the predictions because no loss is calculated during training 
-           
+    
             nforwards = nforwards + 1 
+
         elseif t == 2 then 
+
             -- forward start token
-            start_batch_embedding = clones.word_embedding_layer[t-1]:forward(start_token_batch)
-            embeddings[t] = start_batch_embedding
-            lst = clones.lstm[t]:forward{embeddings[t], unpack(rnn_state[t-1])}         -- lst[t] = {prev_c, prev_h}
+            embeddings[t] = clones.word_embedding_layer[t-1]:forward(start_token_batch)
+            local lst = clones.lstm[t]:forward{embeddings[t], unpack(rnn_state[t-1])}         -- lst[t] = {prev_c, prev_h}
 
             rnn_state[t] = {} 
             for i = 1, #init_state  do table.insert(rnn_state[t], lst[i]) end  -- rnn_state[t] = {prev_c, prev_h}
             
-            number_predictions = number_predictions + opt.batch_size
+            number_predictions = number_predictions + opt.batch_size * opt.seq_per_image
 
             predictions[t] = clones.decoder[t]:forward(lst[#lst])  
-            loss = loss + opt.batch_size * clones.criterion[t-1]:forward(predictions[t], word_batch:select(2, t-1)) -- its target is at t-1th
+            loss = loss +  clones.criterion[t-1]:forward(predictions[t], word_batch:select(2, t-1)) -- its target is at t-1th
+            nforwards = nforwards + 1 
 
-             nforwards = nforwards + 1 
         else 
             
-        
+
             --forward the sequence, t == 3,  
             --input is the first batch token in the sequence batch,  here t ==3, so 3 - 2 == 1 
-            local input_batch = word_batch:select(2, t-2):clone()  
+            local input_batch = word_batch:select(2, t-2) 
+            input_batch = input_batch:clone() 
 
             if input_batch:sum() == 0 then 
-                break  -- jump out the  loop, no need to run afterwards, because all the loop is zero 
+                break  -- jump out the  loop, no need to run afterwards, because all the elements is zero 
             else 
                  nforwards = nforwards + 1 
             end 
@@ -277,18 +292,25 @@ feval = function(x)
             -- input_batch: * * * * 0 0 0 0 0, 0 indicates the end 
             local  mask_input = torch.le(input_batch, 0):view(-1, 1) -- in mask, 1 indicates the end of the sequence, 0 indicates not the end,  
             -- because we have clone input_batch, so will not modify word_batch
-            input_batch[mask_input] = 1 -- replace 0 with any non-zero index, here replace 0 with 1 
-
-            local targets = word_batch:select(2, t-1):clone() 
-            local mask_targets = torch.le(targets, 0)
-        
-            -- replace targets to 1 
-            targets[mask_targets] = 1
+            input_batch[mask_input] = vocab_size + 1 -- replace 0 with any non-zero index, here replace 0 with vocab_size + 1 
             
+            -- print("f: input_batch")
+            -- print(input_batch)
 
-            word_embedding_batch = clones.word_embedding_layer[t-1]:forward(input_batch)
-            embeddings[t] = word_embedding_batch
-            lst = clones.lstm[t]:forward({embeddings[t], unpack(rnn_state[t-1])})
+            local targets = word_batch:select(2, t-1)
+            targets = targets:clone()  
+
+            local mask_targets = torch.le(targets, 0):view(-1, 1)
+        
+            -- replace targets 0  to 1 to avoid lookup table errors  
+            targets[mask_targets] = vocab_size + 1 
+           
+            --print("f: targets")
+            --print(targets)
+            
+            embeddings[t] = clones.word_embedding_layer[t-1]:forward(input_batch)
+
+            local lst = clones.lstm[t]:forward({embeddings[t], unpack(rnn_state[t-1])})
 
             rnn_state[t] = {}
             for i = 1, #init_state do table.insert(rnn_state[t], lst[i]) end
@@ -301,56 +323,58 @@ feval = function(x)
             e_mask = torch.expand(mask_input, predictions[t]:size(1), predictions[t]:size(2))
             
             --print('line 274')
+            -- now remove clone() method before cuda() method 
             if opt.gpuid >= 0 then 
-                e_mask = e_mask:float():clone():cuda()  
+                e_mask = e_mask:float():cuda()  
             else 
-                e_mask = e_mask:float():clone() 
+                e_mask = e_mask:float()
             end 
             
             number_predictions = number_predictions + mask_input:sum()
             predictions[t] = predictions[t]:cmul(e_mask)
-
+          
+            --print(input_batch)
             -- loss
-	        loss = loss + opt.batch_size * clones.criterion[t-1]:forward(predictions[t], targets)
-        end 
+	        loss = loss +  clones.criterion[t-1]:forward(predictions[t], targets)
+        end  
 
     end
 
-
     loss = loss / number_predictions 
 	
-
     -----------------------------------------------------------------------------
 	-- backward pass  
 	-------------------------------------------------------------------------
     -- create initial  hidden state  at loader.seq_len + 2 
-    -- drnn_state's length is the number of  time-steps that has been forwarded  
-    drnn_state = {[nforwards] = utils.clone_list(init_state, true)}
-    drnn_state[nforwards][2] = nil    
+    -- drnn_state's length is the number of  time-steps that has been forwarded
+    --
+    local drnn_state = {[nforwards] = utils.clone_list(init_state, true)}
+    drnn_state[nforwards][2]= nil 
 
     for t = nforwards, 1, -1 do 
         if t == 1 then
             -- train the image model part 
-            -- the image   
+            -- the image 
+            -- input: embeddings[1], unpack(rnn_state[0]), gradOutput: drnn_state[1] 
             dlst = clones.lstm[t]:backward({embeddings[t], unpack(rnn_state[t-1])}, drnn_state[t])
            
-            -- training the image embedding part 
+            -- training the image embedding part separately 
             -- backward through the embeddings
             protos.image_embedding_layer:zeroGradParameters() 
             protos.image_embedding_layer:backward(image_batch, dlst[1]) 
             -- update parameters
             protos.image_embedding_layer:updateParameters(opt.learning_rate)
-
-        elseif t == 2 then 
-            
-            -- the start token batch 
-            dloss = clones.criterion[1]:backward(predictions[t], start_token_batch)
-           
-
-            dloss:mul(opt.batch_size) -- because the mask will be all one, so no need to multilpy with mask 
-            
+        elseif t == 2 then
+            -- print(string.format("t: %d", t)) 
+            -- the start token batch, here no size average  
+            -- targets is the first 
+            -- i have make this error all the way up to now??????!!!!!!!, what a stupid error??!!!
+            -- targets is not start token 
+            local targets = word_batch:select(2, 1) -- 1 = t - 1 = 2 - 1
+            dloss = clones.criterion[1]:backward(predictions[t], targets)   
             doutput_t = clones.decoder[2]:backward(rnn_state[2][#rnn_state[2]], dloss) 
             drnn_state[t][2]:add(doutput_t)
+
             -- backward through LSTM 
             dlst = clones.lstm[t]:backward({embeddings[t], unpack(rnn_state[t-1])}, drnn_state[t])
             
@@ -358,27 +382,34 @@ feval = function(x)
             drnn_state[t-1] = {} 
             table.insert(drnn_state[t-1], dlst[2]) -- drnn_state[1] = dlst[2]
             table.insert(drnn_state[t-1], dlst[3]) -- drnn_state[2] = dlst[3]
-
             -- backward through the embeddings 
             clones.word_embedding_layer[t-1]:backward(start_token_batch, dlst[1])   
-
         else -- the sequence  
              -- backward to the criterion
-            local input_cur = word_batch:select(2, t-2):clone()  -- coresponding targets is word_batch:select(2, t-1)
-            local targets = word_batch:select(2, t-1):clone()  
+            local input_cur = word_batch:select(2, t-2)  -- coresponding targets is word_batch:select(2, t-1)
+            input_cur = input_cur:clone()
+
+            print("input_cur: ")
+            print(input_cur)
+
+            local targets = word_batch:select(2, t-1)
+            targets = targets:clone() 
+            
+            print("targets: ")
+            print(targets)
 
             dloss = clones.criterion[t-1]:backward(predictions[t], targets)
         
             -- we need to zero out corresponding dloss   
             -- zero out the related predictions which corresponding to 1 in input 
-            mask = torch.gt(input_cur, 0):view(-1, 1) -- 0 indicates end, 1 indicates no the end, so not zero it out              
+            local mask = torch.gt(input_cur, 0):view(-1, 1) -- 0 indicates end, 1 indicates no the end, so not zero it out              
 
-            e_mask = torch.expand(mask, dloss:size(1), dloss:size(2))
+            local e_mask = torch.expand(mask, dloss:size(1), dloss:size(2))
            
             if opt.gpuid >= 0 then 
-                e_mask = e_mask:float():clone():cuda()  
+                e_mask = e_mask:float():cuda()  
             else 
-                e_mask = e_mask:float():clone() 
+                e_mask = e_mask:float()
             end 
 
             -- now we can change the input_cur 
@@ -387,8 +418,7 @@ feval = function(x)
             -- input_batch: * * * * 0 0 0 0 0, 0 indicates the end 
             local  mask_input = torch.le(input_cur, 0):view(-1, 1) -- in mask, 1 indicates the end of the sequence, 0 indicates not the end,  
             -- because we have clone input_batch, so will not modify word_batch
-            input_batch[mask_input] = 1 -- replace 0 with any non-zero index, here replace 0 with 1 
-
+            input_cur[mask_input] = vocab_size + 1 -- replace 0 with any non-zero index, here replace 0 with 1 
 
             ----------------------------------------------------------------------------------------------------------------------   
             -- !!!problem: dloss cannot be corectly computed, all are scaled
@@ -396,34 +426,43 @@ feval = function(x)
             -- each row will be assigned a weight of 1/8, which is terrible 
             ---------------------------------------------------------------------------------------------------------------------------
             dloss = dloss:cmul(e_mask) 
-            
-            if t == loader.seq_len+2 then 
-                assert(drnn_state[loader.seq_len+2][2] == nil)
+
+            if t == nforwards then 
+                assert(drnn_state[nforwards][2] == nil)
                 doutput_t = clones.decoder[t]:backward(rnn_state[t][#rnn_state[t]], dloss) -- rnn_state[t][#rnn_state[t]] record the input of the decoder at time step t 
                 drnn_state[t][2] = doutput_t
             else
-                doutput_t = clones.decoder[t]:backward(rnn_state[t][#rnn_state[t]], dloss) -- rnn_state[t][#rnn_state[t]] record the input of the decoder at time step t 
+                doutput_t = clones.decoder[t]:backward(rnn_state[t][#rnn_state[t]], dloss) -- rnn_state[t][#rnn_state[t]] record the input of the decoder at timestep 
                 drnn_state[t][2]:add(doutput_t)
             end 
-            
+
             -- backward through LSTM 
-            -- Note that dlst = dlst, rnn_state[t-1], this will be used at previous step, note this is a backward step 
             dlst = clones.lstm[t]:backward({embeddings[t], unpack(rnn_state[t-1])}, drnn_state[t])
-            
+
             drnn_state[t-1] = {}
             table.insert(drnn_state[t-1], dlst[2]) -- drnn_state[1] = dlst[2]
             table.insert(drnn_state[t-1], dlst[3]) -- drnn_state[2] = dlst[3]
+            -- backward through the embeddings
            
-            -- backward through the embeddings 
+            --print("input_cur:") 
+            --print(input_cur)
+           
             clones.word_embedding_layer[t-1]:backward(input_cur, dlst[1]) 
         end 
+
+--        print(string.format("nforwards: %d", nforwards))
+ 
+        collectgarbage() 
     end 
+
+    collectgarbage() 
 
     --grad_params:clamp(-5, 5)
     grad_params:div(number_predictions):clamp(-5, 5)
 
     return loss, grad_params
-end 
+
+end  
 
 ---------------------------------------------------------------------------------
 -- set optimization  parameters configuration

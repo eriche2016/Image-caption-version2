@@ -22,7 +22,7 @@ function Dataset:__init(opt)
 	self.cycle = 0
     self.gpuid = opt.gpuid or -1 -- by default use cpu, ie load data to cpu 
     self.split = opt.split or 'train'
-    self.seq_per_image = self.seq_per_image or 5 
+    self.seq_per_image = opt.seq_per_image or 5 
 end
 
 function Dataset:loadDataset(opt) 
