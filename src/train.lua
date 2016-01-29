@@ -8,6 +8,9 @@
 --  1. ClassNLLCriterion module
 --  2. LookupTable module 
 --  etc.
+--  mark 1 on Jan 29: 
+--  note that we must make sure every time we load to GPU the memory for the gpu memory variable stays the same, otherwise will reallocate a 
+--  memory, which will increase the overheads 
 -------------------------------------------------------------------
 
 require 'torch'
@@ -225,7 +228,7 @@ feval = function(x)
      ----get minibatch
      ----------------------------------------------------------------------------
 	
-    image_batch, word_batch = loader:getNextBatch()
+    local image_batch, word_batch = loader:getNextBatch()
     local start_token_batch = torch.LongTensor(opt.batch_size * opt.seq_per_image):fill(vocab_size + 1) -- START is the same as END token, indicates the end of a sentence 
     
     if opt.gpuid >= 0 then 
@@ -235,19 +238,18 @@ feval = function(x)
     ----------------------------------------------------------------------------
     -- forward pass 
     ----------------------------------------------------------------------------
-    loss = 0.0
+    local loss = 0.0
 
     local rnn_state = {[0] = init_state_global}
    
     local embeddings = {} 
     local predictions = {} -- record the output at each time step 
-    local loss = 0.0
-    number_predictions = 0 
-    nforwards = 0 
+    local number_predictions = 0 
+    local nforwards = 0 
 
     for t = 1, loader.seq_len+2 do
-        if t ==1 then 
 
+        if t ==1 then 
         	-- t = 1, just forward  a batch of images 
             embeddings[t] = protos.image_embedding_layer:forward(image_batch)  
 
@@ -263,7 +265,7 @@ feval = function(x)
 
             -- forward start token
             embeddings[t] = clones.word_embedding_layer[t-1]:forward(start_token_batch)
-            local lst = clones.lstm[t]:forward{embeddings[t], unpack(rnn_state[t-1])}         -- lst[t] = {prev_c, prev_h}
+            local  lst = clones.lstm[t]:forward{embeddings[t], unpack(rnn_state[t-1])}         -- lst[t] = {prev_c, prev_h}
 
             rnn_state[t] = {} 
             for i = 1, #init_state  do table.insert(rnn_state[t], lst[i]) end  -- rnn_state[t] = {prev_c, prev_h}
@@ -280,17 +282,18 @@ feval = function(x)
             --forward the sequence, t == 3,  
             --input is the first batch token in the sequence batch,  here t ==3, so 3 - 2 == 1 
             local input_batch = word_batch:select(2, t-2) 
-            input_batch = input_batch:clone() 
-
+            input_batch = input_batch:clone()
+            --[[ illegal memroy access caused by this? mark 1   
             if input_batch:sum() == 0 then 
                 break  -- jump out the  loop, no need to run afterwards, because all the elements is zero 
             else 
                  nforwards = nforwards + 1 
             end 
+            --]]
             
             -- replace all the zeros in the input_batch with any index, to avoid the LookupTable  error 
             -- input_batch: * * * * 0 0 0 0 0, 0 indicates the end 
-            local  mask_input = torch.le(input_batch, 0):view(-1, 1) -- in mask, 1 indicates the end of the sequence, 0 indicates not the end,  
+            local mask_input = torch.le(input_batch, 0):view(-1, 1) -- in mask, 1 indicates the end of the sequence, 0 indicates not the end,  
             -- because we have clone input_batch, so will not modify word_batch
             input_batch[mask_input] = vocab_size + 1 -- replace 0 with any non-zero index, here replace 0 with vocab_size + 1 
             
@@ -320,7 +323,7 @@ feval = function(x)
             -- zero out the predictions corresponding to 0 in input 
             -- back to mask will mask out pred correspoding to 0 in input 
             mask_input = torch.eq(mask_input, 0)
-            e_mask = torch.expand(mask_input, predictions[t]:size(1), predictions[t]:size(2))
+            local e_mask = torch.expand(mask_input, predictions[t]:size(1), predictions[t]:size(2))
             
             --print('line 274')
             -- now remove clone() method before cuda() method 
@@ -347,16 +350,22 @@ feval = function(x)
 	-------------------------------------------------------------------------
     -- create initial  hidden state  at loader.seq_len + 2 
     -- drnn_state's length is the number of  time-steps that has been forwarded
-    --
-    local drnn_state = {[nforwards] = utils.clone_list(init_state, true)}
+    
+    --[[ mark 1 
+    local  drnn_state = {[nforwards] = utils.clone_list(init_state, true)}
     drnn_state[nforwards][2]= nil 
-
+    --]]
+    local  drnn_state = {[loader.seq_len+2] = utils.clone_list(init_state, true)}
+    drnn_state[loader.seq_len+2][2]= nil 
+    --[[ mark 1 
     for t = nforwards, 1, -1 do 
+    --]] 
+    for t = loader.seq_len+2, 1, -1 do 
         if t == 1 then
             -- train the image model part 
             -- the image 
             -- input: embeddings[1], unpack(rnn_state[0]), gradOutput: drnn_state[1] 
-            dlst = clones.lstm[t]:backward({embeddings[t], unpack(rnn_state[t-1])}, drnn_state[t])
+            local dlst = clones.lstm[t]:backward({embeddings[t], unpack(rnn_state[t-1])}, drnn_state[t])
            
             -- training the image embedding part separately 
             -- backward through the embeddings
@@ -371,12 +380,12 @@ feval = function(x)
             -- i have make this error all the way up to now??????!!!!!!!, what a stupid error??!!!
             -- targets is not start token 
             local targets = word_batch:select(2, 1) -- 1 = t - 1 = 2 - 1
-            dloss = clones.criterion[1]:backward(predictions[t], targets)   
-            doutput_t = clones.decoder[2]:backward(rnn_state[2][#rnn_state[2]], dloss) 
+            local dloss = clones.criterion[1]:backward(predictions[t], targets)   
+            local doutput_t = clones.decoder[2]:backward(rnn_state[2][#rnn_state[2]], dloss) 
             drnn_state[t][2]:add(doutput_t)
 
             -- backward through LSTM 
-            dlst = clones.lstm[t]:backward({embeddings[t], unpack(rnn_state[t-1])}, drnn_state[t])
+            local dlst = clones.lstm[t]:backward({embeddings[t], unpack(rnn_state[t-1])}, drnn_state[t])
             
             -- record to be used in previous step, ie, in 1 step 
             drnn_state[t-1] = {} 
@@ -384,21 +393,23 @@ feval = function(x)
             table.insert(drnn_state[t-1], dlst[3]) -- drnn_state[2] = dlst[3]
             -- backward through the embeddings 
             clones.word_embedding_layer[t-1]:backward(start_token_batch, dlst[1])   
-        else -- the sequence  
+        else
+            -- the sequence  
              -- backward to the criterion
             local input_cur = word_batch:select(2, t-2)  -- coresponding targets is word_batch:select(2, t-1)
+            
             input_cur = input_cur:clone()
 
-            print("input_cur: ")
-            print(input_cur)
+           -- print("input_cur: ")
+           -- print(input_cur)
 
             local targets = word_batch:select(2, t-1)
             targets = targets:clone() 
             
-            print("targets: ")
-            print(targets)
+           --  print("targets: ")
+           --  print(targets)
 
-            dloss = clones.criterion[t-1]:backward(predictions[t], targets)
+            local dloss = clones.criterion[t-1]:backward(predictions[t], targets)
         
             -- we need to zero out corresponding dloss   
             -- zero out the related predictions which corresponding to 1 in input 
@@ -416,7 +427,7 @@ feval = function(x)
             -- 0 corresponding to 1 
             -- replace all the zeros in the input_batch with any index, to avoid the LookupTable  error 
             -- input_batch: * * * * 0 0 0 0 0, 0 indicates the end 
-            local  mask_input = torch.le(input_cur, 0):view(-1, 1) -- in mask, 1 indicates the end of the sequence, 0 indicates not the end,  
+            local mask_input = torch.le(input_cur, 0):view(-1, 1) -- in mask, 1 indicates the end of the sequence, 0 indicates not the end,  
             -- because we have clone input_batch, so will not modify word_batch
             input_cur[mask_input] = vocab_size + 1 -- replace 0 with any non-zero index, here replace 0 with 1 
 
@@ -427,17 +438,21 @@ feval = function(x)
             ---------------------------------------------------------------------------------------------------------------------------
             dloss = dloss:cmul(e_mask) 
 
-            if t == nforwards then 
-                assert(drnn_state[nforwards][2] == nil)
-                doutput_t = clones.decoder[t]:backward(rnn_state[t][#rnn_state[t]], dloss) -- rnn_state[t][#rnn_state[t]] record the input of the decoder at time step t 
+        
+            --if t == nforwards then  mark 1 
+            if t == loader.seq_len + 2 then 
+                -- mark 1 
+                -- assert(drnn_state[nforwards][2] == nil)
+                assert(drnn_state[loader.seq_len + 2][2] == nil) 
+                local doutput_t = clones.decoder[t]:backward(rnn_state[t][#rnn_state[t]], dloss) -- rnn_state[t][#rnn_state[t]] record the input of the decoder at time step t 
                 drnn_state[t][2] = doutput_t
             else
-                doutput_t = clones.decoder[t]:backward(rnn_state[t][#rnn_state[t]], dloss) -- rnn_state[t][#rnn_state[t]] record the input of the decoder at timestep 
+                local doutput_t = clones.decoder[t]:backward(rnn_state[t][#rnn_state[t]], dloss) -- rnn_state[t][#rnn_state[t]] record the input of the decoder at timestep 
                 drnn_state[t][2]:add(doutput_t)
             end 
 
             -- backward through LSTM 
-            dlst = clones.lstm[t]:backward({embeddings[t], unpack(rnn_state[t-1])}, drnn_state[t])
+            local dlst = clones.lstm[t]:backward({embeddings[t], unpack(rnn_state[t-1])}, drnn_state[t])
 
             drnn_state[t-1] = {}
             table.insert(drnn_state[t-1], dlst[2]) -- drnn_state[1] = dlst[2]
@@ -447,7 +462,8 @@ feval = function(x)
             --print("input_cur:") 
             --print(input_cur)
            
-            clones.word_embedding_layer[t-1]:backward(input_cur, dlst[1]) 
+            clones.word_embedding_layer[t-1]:backward(input_cur, dlst[1])
+
         end 
 
 --        print(string.format("nforwards: %d", nforwards))
