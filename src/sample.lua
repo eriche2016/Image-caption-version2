@@ -23,7 +23,7 @@ cmd:option('model', '../model/google_vic.t7', 'the directory of the model')
 cmd:option('-seed', 123, 'random number generator\'s seed')
 
 -- gpu/cpu
-cmd:option('-gpuid', 1, '0-indexed of gpu to use. -1 = cpu')  -- must be 1
+cmd:option('-gpuid', 0, '0-indexed of gpu to use. -1 = cpu')  -- must be tested using gpu version 
 
 
 cmd:text() 
@@ -114,9 +114,9 @@ for t  = 1, 37 do
         for i = 1, #init_state do table.insert(rnn_state[1], lst[i]:clone()) end 
     else
         -- forward the prev token
-        start_token_embedding = protos.word_embedding_layer:forward(prev_idx)
+        cur_token_embedding = protos.word_embedding_layer:forward(prev_idx)
         --print('line 84')
-        lst = protos.lstm:forward({test_image_embedding, unpack(rnn_state[t-1])})
+        lst = protos.lstm:forward({cur_token_embedding, unpack(rnn_state[t-1])})
 
         rnn_state[t] = {} 
 

@@ -9,8 +9,9 @@
 --  2. LookupTable module 
 --  etc.
 --  mark 1 on Jan 29: 
---  note that we must make sure every time we load to GPU the memory for the gpu memory variable stays the same, otherwise will reallocate a 
---  memory, which will increase the overheads 
+--  note that we must make sure every time we load to GPU the memory space for the gpu memory variable stays the same, otherwise will reallocate a 
+--  memory, which will increase the overheads, this will cause the cuda error 77
+--  illegal memory access.
 -------------------------------------------------------------------
 
 require 'torch'
